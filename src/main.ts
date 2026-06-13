@@ -1,29 +1,45 @@
 import { AudioSys } from './audio';
-import { Game } from './game';
-import { Input } from './input';
+import { Bindings, Input } from './input';
+import { runLobby } from './lobby';
+import { runGuest, runHost, runLocal } from './session';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 
 const input = new Input();
 const audio = new AudioSys();
-const game = new Game(ctx, input, audio);
 
-// браузер разрешает звук только после жеста пользователя
+// the browser allows audio only after a user gesture
 const unlock = () => audio.unlock();
 addEventListener('keydown', unlock, { once: true });
 addEventListener('pointerdown', unlock, { once: true });
 
-let last = performance.now();
-function frame(now: number): void {
-  // ограничиваем dt, чтобы при сворачивании вкладки не было гигантского шага
-  const dt = Math.min((now - last) / 1000, 1 / 30);
-  last = now;
+// key layouts. In network and solo modes one player is at the keyboard — all the
+// usual keys at once. In "two on one PC" mode the keyboard is split in half.
+const SOLO: Bindings = {
+  left: ['ArrowLeft', 'KeyA'],
+  right: ['ArrowRight', 'KeyD'],
+  jump: ['Space', 'ArrowUp', 'KeyW'],
+  fire: ['KeyX', 'KeyJ'],
+};
+const PLAYER_1: Bindings = { left: ['ArrowLeft'], right: ['ArrowRight'], jump: ['ArrowUp'], fire: ['Slash'] };
+const PLAYER_2: Bindings = { left: ['KeyA'], right: ['KeyD'], jump: ['KeyW'], fire: ['KeyF'] };
 
-  game.update(dt);
-  game.render();
-  input.endFrame();
-
-  requestAnimationFrame(frame);
+async function main(): Promise<void> {
+  const result = await runLobby();
+  switch (result.mode) {
+    case 'host':
+      runHost(ctx, input, audio, result.net, SOLO);
+      break;
+    case 'guest':
+      runGuest(ctx, input, audio, result.net, SOLO);
+      break;
+    case 'local2':
+      runLocal(ctx, input, audio, [PLAYER_1, PLAYER_2]);
+      break;
+    default:
+      runLocal(ctx, input, audio, [SOLO]);
+  }
 }
-requestAnimationFrame(frame);
+
+main();

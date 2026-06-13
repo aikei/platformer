@@ -1,3 +1,4 @@
+import { EMPTY_INPUT, InputState } from './input';
 import { Level, TILE } from './level';
 
 export interface Rect {
@@ -11,7 +12,7 @@ export function overlaps(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-/** Перемещает тело по сетке тайлов, ось X и Y отдельно. */
+/** Moves a body across the tile grid, X and Y axes separately. */
 export function moveBody(
   body: Rect & { vx: number; vy: number },
   level: Level,
@@ -66,7 +67,7 @@ export function moveBody(
       }
     } else if (body.vy < 0) {
       const ty = Math.floor(body.y / TILE);
-      // ищем блок ближе всего к центру головы — для удара по «?»
+      // find the block nearest to the head's centre — for hitting a '?'
       let best: { tx: number; ty: number } | null = null;
       let bestDist = Infinity;
       const cx = body.x + body.w / 2;
@@ -90,7 +91,7 @@ export function moveBody(
   return { onGround, hitHead, hitWall };
 }
 
-// ---------- враги ----------
+// ---------- enemies ----------
 
 export type EnemyKind = 'walker' | 'turtle' | 'spiky' | 'flyer' | 'hopper' | 'giant';
 
@@ -99,11 +100,11 @@ export const ENEMY_INFO: Record<
   { w: number; h: number; speed: number; score: number; hp: number }
 > = {
   walker: { w: 26, h: 24, speed: 60, score: 200, hp: 1 },
-  turtle: { w: 28, h: 26, speed: 110, score: 300, hp: 1 }, // быстрая, не боится обрывов
-  spiky: { w: 28, h: 22, speed: 50, score: 400, hp: 1 }, // нельзя прыгать сверху
-  flyer: { w: 28, h: 20, speed: 70, score: 300, hp: 1 }, // летает синусоидой
-  hopper: { w: 24, h: 26, speed: 90, score: 300, hp: 1 }, // прыгает в сторону игрока
-  giant: { w: 42, h: 38, speed: 40, score: 500, hp: 2 }, // нужно два прыжка сверху
+  turtle: { w: 28, h: 26, speed: 110, score: 300, hp: 1 }, // fast, not afraid of ledges
+  spiky: { w: 28, h: 22, speed: 50, score: 400, hp: 1 }, // can't be jumped on from above
+  flyer: { w: 28, h: 20, speed: 70, score: 300, hp: 1 }, // flies in a sine wave
+  hopper: { w: 24, h: 26, speed: 90, score: 300, hp: 1 }, // jumps toward the player
+  giant: { w: 42, h: 38, speed: 40, score: 500, hp: 2 }, // needs two stomps from above
 };
 
 export class Enemy {
@@ -114,12 +115,12 @@ export class Enemy {
   vx: number;
   vy = 0;
   alive = true;
-  squashTimer = 0; // время показа «раздавленного» врага
+  squashTimer = 0; // how long to show the 'squashed' enemy
   hp: number;
-  phase = Math.random() * Math.PI * 2; // фаза анимации/полёта
-  baseY = 0; // ось полёта летуна
-  jumpTimer = 1; // пауза между прыжками прыгуна
-  hurtFlash = 0; // подсветка гиганта после первого удара
+  phase = Math.random() * Math.PI * 2; // animation/flight phase
+  baseY = 0; // flight axis of the flyer
+  jumpTimer = 1; // pause between the hopper's jumps
+  hurtFlash = 0; // giant's highlight after the first hit
 
   constructor(
     x: number,
@@ -146,7 +147,7 @@ export class Enemy {
   }
 }
 
-// ---------- бонусы ----------
+// ---------- power-ups ----------
 
 export type PowerUpKind = 'mushroom' | 'sunflower';
 
@@ -157,7 +158,7 @@ export class PowerUp {
   h = 24;
   vx = 0;
   vy = 0;
-  emerging = true; // вылезает из блока
+  emerging = true; // rising out of the block
   dead = false;
   readonly targetY: number;
 
@@ -194,7 +195,7 @@ export class Fireball {
   }
 }
 
-// ---------- игрок ----------
+// ---------- player ----------
 
 export class Player {
   x = 0;
@@ -205,19 +206,27 @@ export class Player {
   vy = 0;
   onGround = false;
   facing: 1 | -1 = 1;
-  coyote = 0; // время после схода с земли, когда ещё можно прыгнуть
-  jumpBuffer = 0; // время после нажатия прыжка, когда он ещё сработает
-  invuln = 0; // неуязвимость после урона
-  runTime = 0; // для анимации ног
-  power: 0 | 1 | 2 = 0; // 0 — маленький, 1 — гриб, 2 — подсолнух
+  coyote = 0; // time after leaving the ground during which a jump is still allowed
+  jumpBuffer = 0; // time after pressing jump during which it still fires
+  invuln = 0; // invulnerability after taking damage
+  runTime = 0; // for the leg animation
+  power: 0 | 1 | 2 = 0; // 0 — small, 1 — mushroom, 2 — sunflower
   fireCooldown = 0;
+
+  // the player's intent this frame (set by the driver: keyboard or network)
+  input: InputState = { ...EMPTY_INPUT };
+  dead = false; // died, respawn countdown is running
+  out = false; // out of lives — eliminated for good
+  respawnTimer = 0;
+
+  constructor(public readonly id = 0) {}
 
   setPower(n: 0 | 1 | 2): void {
     const oldH = this.h;
     this.power = n;
     this.w = n > 0 ? 26 : 22;
     this.h = n > 0 ? 40 : 26;
-    this.y -= this.h - oldH; // ноги остаются на месте
+    this.y -= this.h - oldH; // keep the feet in place
   }
 
   get rect(): Rect {

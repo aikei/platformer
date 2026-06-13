@@ -1,11 +1,26 @@
 import type { Biome } from './level';
 
-// Вся музыка и звуки синтезируются через WebAudio — без аудиофайлов.
-// Контекст создаётся лениво: браузеры разрешают звук только после жеста пользователя.
+// All music and sounds are synthesized via WebAudio — no audio files.
+// The context is created lazily: browsers allow audio only after a user gesture.
 
 type Wave = OscillatorType;
 
-// мелодия и бас в полутонах от C4 (null — пауза), восьмые ноты
+// Sound effects AudioSys can play (no arguments). The host records them by name
+// and sends them to the guest so it plays the same thing.
+export type SoundName =
+  | 'jump'
+  | 'coin'
+  | 'stomp'
+  | 'bump'
+  | 'brick'
+  | 'powerupAppear'
+  | 'powerup'
+  | 'fire'
+  | 'hurt'
+  | 'die'
+  | 'win';
+
+// melody and bass in semitones from C4 (null — rest), eighth notes
 const MELODY: (number | null)[] = [
   12, null, 16, null, 19, null, 16, null,
   14, null, 17, null, 21, 19, 17, 14,
@@ -20,11 +35,11 @@ const BASS: (number | null)[] = [
 ];
 const STEP_DUR = 0.21; // ~143 BPM
 
-// тональность под настроение биома
+// key tuned to each biome's mood
 const TRANSPOSE: Record<Biome, number> = { grass: 0, desert: 3, snow: 5, cave: -5 };
 
 function freq(semitone: number): number {
-  return 261.63 * Math.pow(2, semitone / 12); // от C4
+  return 261.63 * Math.pow(2, semitone / 12); // from C4
 }
 
 export class AudioSys {
@@ -36,7 +51,7 @@ export class AudioSys {
   private nextNote = 0;
   private step = 0;
 
-  /** Вызывается по первому нажатию клавиши/клику — создаёт контекст. */
+  /** Called on the first key press/click — creates the context. */
   unlock(): void {
     this.ensure();
   }
@@ -76,7 +91,7 @@ export class AudioSys {
   private scheduleMusic(): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    // планируем ноты с небольшим запасом вперёд
+    // schedule notes a little ahead of time
     const ahead = ctx.currentTime + 0.18;
     while (this.nextNote < ahead) {
       if (this.musicOn) {
@@ -104,7 +119,7 @@ export class AudioSys {
     o.stop(time + dur);
   }
 
-  /** Короткий звук со скольжением частоты. */
+  /** Short sound with a frequency glide. */
   private beep(f0: number, f1: number, dur: number, type: Wave, vol = 0.3, delay = 0): void {
     const ctx = this.ensure();
     if (!ctx) return;

@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Платформер</title>
+    <title>Platformer</title>
     <style>
       html, body {
         margin: 0;
@@ -20,10 +20,130 @@
         max-height: 100vh;
         box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
       }
+
+      /* lobby overlay on top of the canvas */
+      #lobby {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(10, 10, 25, 0.85);
+        color: #fff;
+        z-index: 10;
+      }
+      #lobby[hidden] {
+        display: none;
+      }
+      #lobby .panel {
+        background: #232347;
+        padding: 32px 40px;
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        text-align: center;
+        min-width: 280px;
+      }
+      #lobby h1 {
+        margin: 0 0 24px;
+        letter-spacing: 4px;
+        font-size: 28px;
+      }
+      #lobby button {
+        display: block;
+        width: 100%;
+        margin: 8px 0;
+        padding: 12px;
+        font: inherit;
+        font-size: 16px;
+        color: #fff;
+        background: #3a3a6e;
+        border: 0;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      #lobby button:hover:not(:disabled) {
+        background: #4a4a8e;
+      }
+      #lobby button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      #lobby input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px;
+        font: inherit;
+        font-size: 22px;
+        letter-spacing: 6px;
+        text-align: center;
+        text-transform: uppercase;
+        border-radius: 8px;
+        border: 2px solid #4a4a8e;
+        background: #1a1a33;
+        color: #fff;
+        margin-bottom: 8px;
+      }
+      #lobby .code {
+        font-size: 40px;
+        letter-spacing: 10px;
+        font-weight: bold;
+        color: #ffd23f;
+        margin: 12px 0;
+      }
+      #lobby .status {
+        font-size: 14px;
+        opacity: 0.8;
+        min-height: 18px;
+      }
+      #lobby .error {
+        color: #ff6b6b;
+        font-size: 14px;
+        min-height: 18px;
+      }
+      #lobby .link {
+        color: #9aa6ff;
+        background: none;
+        font-size: 13px;
+        padding: 4px;
+        width: auto;
+        margin: 12px auto 0;
+      }
     </style>
   </head>
   <body>
     <canvas id="game" width="960" height="540"></canvas>
+
+    <div id="lobby">
+      <div class="panel">
+        <h1>PLATFORMER</h1>
+
+        <div id="menu">
+          <button id="btn-solo">Single player</button>
+          <button id="btn-local2">Two players (1 PC)</button>
+          <button id="btn-host">Host game</button>
+          <button id="btn-join">Join by code</button>
+        </div>
+
+        <div id="host-view" hidden>
+          <p>Room code — read it to a friend:</p>
+          <div id="code" class="code">····</div>
+          <p id="host-status" class="status">connecting…</p>
+          <button id="btn-start" disabled>Start</button>
+          <button class="link back">← back</button>
+        </div>
+
+        <div id="join-view" hidden>
+          <p>Enter the room code:</p>
+          <input id="code-input" maxlength="4" autocomplete="off" placeholder="CODE" />
+          <button id="btn-connect">Join</button>
+          <p id="join-status" class="status"></p>
+          <button class="link back">← back</button>
+        </div>
+
+        <p id="lobby-error" class="error"></p>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
