@@ -11,9 +11,9 @@ import {
   Player,
   PowerUp,
 } from './entities';
-import { Input } from './input';
+import { Input, InputState } from './input';
 import { Biome, Level, LevelData, TILE } from './level';
-import { Snapshot, TileChange } from './protocol';
+import { PlayerSnap, Snapshot, TileChange } from './protocol';
 
 const GRAVITY = 2000;
 const MAX_FALL = 900;
@@ -235,10 +235,13 @@ export class Game {
         w: p.w,
         h: p.h,
         vx: p.vx,
+        vy: p.vy,
         facing: p.facing,
         power: p.power,
         invuln: p.invuln,
         onGround: p.onGround,
+        coyote: p.coyote,
+        jumpBuffer: p.jumpBuffer,
         runTime: p.runTime,
         dead: p.dead,
         out: p.out,
@@ -265,6 +268,7 @@ export class Game {
       coinCount: this.coinCount,
       lives: this.lives,
       state: this.state,
+      acks: [], // filled in by the host (session.ts) before sending
     };
     return s;
   }
@@ -298,6 +302,23 @@ export class Game {
       return u;
     });
     this.fireballs = s.fireballs.map((fs) => new Fireball(fs.x, fs.y, 0));
+  }
+
+  /**
+   * Guest: re-simulate the local player from an authoritative state forward
+   * through its not-yet-acknowledged inputs (client-side prediction). Only the
+   * owner's player moves; everything else stays as the host snapshot left it.
+   */
+  predictOwn(slot: number, auth: PlayerSnap, steps: { input: InputState; dt: number }[]): void {
+    const p = this.players[slot];
+    if (!p) return;
+    Object.assign(p, auth); // reset to the host's authoritative state, then replay
+    if (p.dead || p.out) return;
+    for (const s of steps) {
+      p.input = s.input;
+      this.updatePlayer(p, s.dt, true);
+      if (p.dead || p.out) break;
+    }
   }
 
   /** Guest: advance cosmetic time and camera, then draw (no simulation). */
@@ -351,7 +372,11 @@ export class Game {
     }
   }
 
-  private updatePlayer(p: Player, dt: number): void {
+  // `predict` = the guest re-simulating its own player. In that mode the player
+  // moves exactly as on the host, but world side-effects (sounds, spawned
+  // fireballs, block bumps, death, the finish flag) are suppressed — those are
+  // authoritative and arrive via snapshots, so replaying them would double up.
+  private updatePlayer(p: Player, dt: number, predict = false): void {
     const inp = p.input;
 
     // slippery on snow
@@ -381,7 +406,7 @@ export class Game {
       p.vy = -JUMP_SPEED;
       p.jumpBuffer = 0;
       p.coyote = 0;
-      this.sfx('jump');
+      if (!predict) this.sfx('jump');
     }
     // released jump — shorter hop
     if (p.vy < -200 && !inp.jump) {
@@ -391,9 +416,11 @@ export class Game {
     // fireballs from the sunflower
     p.fireCooldown = Math.max(0, p.fireCooldown - dt);
     if (p.power === 2 && p.fireCooldown === 0 && inp.fire) {
-      this.fireballs.push(new Fireball(p.x + p.w / 2 + p.facing * 12, p.y + 10, p.facing * 420));
+      if (!predict) {
+        this.fireballs.push(new Fireball(p.x + p.w / 2 + p.facing * 12, p.y + 10, p.facing * 420));
+        this.sfx('fire');
+      }
       p.fireCooldown = 0.35;
-      this.sfx('fire');
     }
 
     p.vy = Math.min(p.vy + GRAVITY * dt, MAX_FALL);
@@ -401,10 +428,12 @@ export class Game {
     const res = moveBody(p, this.level, dt);
     p.onGround = res.onGround;
     if (res.onGround) p.coyote = COYOTE_TIME;
-    if (res.hitHead) this.bumpBlock(p, res.hitHead.tx, res.hitHead.ty);
+    if (res.hitHead && !predict) this.bumpBlock(p, res.hitHead.tx, res.hitHead.ty);
 
     p.x = Math.max(0, Math.min(p.x, this.level.pixelWidth - p.w));
     p.invuln = Math.max(0, p.invuln - dt);
+
+    if (predict) return; // the rest is host-authoritative (death, level-complete)
 
     // fell into a pit
     if (p.y > this.level.pixelHeight + 100) this.killPlayer(p);

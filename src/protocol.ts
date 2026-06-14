@@ -22,10 +22,13 @@ export interface PlayerSnap {
   w: number;
   h: number;
   vx: number;
+  vy: number; // needed so the guest can roll its own player forward from this state
   facing: 1 | -1;
   power: 0 | 1 | 2;
   invuln: number;
   onGround: boolean;
+  coyote: number; // jump-grace timers — carried so reconciliation reproduces jumps exactly
+  jumpBuffer: number;
   runTime: number;
   dead: boolean;
   out: boolean;
@@ -75,6 +78,7 @@ export interface Snapshot {
   coinCount: number;
   lives: number;
   state: 'playing' | 'gameover' | 'won';
+  acks: number[]; // last guest input seq the host has applied, indexed by slot (for reconciliation)
 }
 
 // host → guest
@@ -82,5 +86,6 @@ export type HostMsg =
   | { k: 'init'; level: LevelData; slot: number; count: number }
   | { k: 'snap'; s: Snapshot };
 
-// guest → host
-export type GuestMsg = { k: 'ready' } | { k: 'input'; h: Held };
+// guest → host. `seq` is a monotonic counter so the host can tell the guest
+// (via Snapshot.acks) which of its inputs are already baked into the snapshot.
+export type GuestMsg = { k: 'ready' } | { k: 'input'; h: Held; seq: number };
