@@ -1,0 +1,21 @@
+[Unit]
+Description=Platformer multiplayer relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aikei
+WorkingDirectory=/home/aikei/web/platformer
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=8080
+Environment=TLS_CERT_FILE=/etc/platformer-relay/fullchain.pem
+Environment=TLS_KEY_FILE=/etc/platformer-relay/privkey.pem
+Environment=PATH=/home/aikei/.nvm/versions/node/v25.8.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/aikei/.nvm/versions/node/v25.8.1/bin/npm start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

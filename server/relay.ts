@@ -8,9 +8,14 @@
 // Run: npm start   (PORT defaults to 8080)
 
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createServer } from 'node:https';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const PORT = Number(process.env.PORT ?? 8080);
+const HOST = process.env.HOST ?? '0.0.0.0';
+const TLS_CERT_FILE = process.env.TLS_CERT_FILE;
+const TLS_KEY_FILE = process.env.TLS_KEY_FILE;
 
 // ---------- protocol ----------
 //
@@ -146,7 +151,15 @@ function handleMessage(client: Client, msg: any): void {
   }
 }
 
-const wss = new WebSocketServer({ port: PORT });
+const tlsEnabled = Boolean(TLS_CERT_FILE && TLS_KEY_FILE);
+const server = tlsEnabled
+  ? createServer({
+      cert: readFileSync(TLS_CERT_FILE!),
+      key: readFileSync(TLS_KEY_FILE!),
+    })
+  : undefined;
+
+const wss = server ? new WebSocketServer({ server }) : new WebSocketServer({ port: PORT, host: HOST });
 
 wss.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
@@ -187,4 +200,10 @@ wss.on('connection', (socket) => {
   socket.on('close', () => clearInterval(ping));
 });
 
-console.log(`relay listening on ws://0.0.0.0:${PORT}`);
+if (server) {
+  server.listen(PORT, HOST, () => {
+    console.log(`relay listening on wss://${HOST}:${PORT}`);
+  });
+} else {
+  console.log(`relay listening on ws://${HOST}:${PORT}`);
+}
