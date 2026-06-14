@@ -24,6 +24,9 @@ const JUMP_SPEED = 840;
 const COYOTE_TIME = 0.1;
 const JUMP_BUFFER = 0.12;
 const STOMP_BOUNCE = 600;
+// Guest prediction: how many frames a predicted stomp keeps an enemy hidden
+// before giving up if the host never confirms it (self-heals a misprediction).
+const PREDICT_TTL = 30;
 
 type GameState = 'playing' | 'gameover' | 'won';
 
@@ -133,6 +136,9 @@ export class Game {
   private pendingTiles: TileChange[] = []; // tile changes not yet sent to guests
   private pendingSounds: SoundName[] = []; // sounds from this frame not yet sent to guests
   private _epoch = 0; // increments on each new level generation (to re-init guests)
+  // guest-only client-side prediction of interactions, reconciled by snapshots:
+  private predictedCoins = new Set<number>(); // coins locally shown as taken
+  private predictedKills = new Map<number, number>(); // enemy index → frames left to keep it hidden
 
   constructor(
     private ctx: CanvasRenderingContext2D,
@@ -284,6 +290,8 @@ export class Game {
     s.coinsTaken.forEach((taken, i) => {
       if (this.coins[i]) this.coins[i].taken = taken;
     });
+    // drop coin predictions the host has now confirmed (so they don't linger)
+    for (const i of this.predictedCoins) if (this.coins[i]?.taken) this.predictedCoins.delete(i);
     this.players = s.players.map((ps) => {
       const p = new Player(ps.id);
       Object.assign(p, ps);
@@ -305,19 +313,81 @@ export class Game {
   }
 
   /**
-   * Guest: re-simulate the local player from an authoritative state forward
-   * through its not-yet-acknowledged inputs (client-side prediction). Only the
-   * owner's player moves; everything else stays as the host snapshot left it.
+   * Guest: re-simulate the local player from the authoritative snapshot forward
+   * through its not-yet-acknowledged inputs (client-side prediction), and locally
+   * apply its interactions (coins, block bumps, enemy stomps) so they feel instant.
+   * Effects are visual/movement only — sounds and score still come from the host
+   * snapshot — and everything is reconciled when the next snapshot arrives.
    */
-  predictOwn(slot: number, auth: PlayerSnap, steps: { input: InputState; dt: number }[]): void {
+  guestPredict(slot: number, auth: PlayerSnap, steps: { input: InputState; dt: number }[]): void {
+    this.tickPredictions();
+    this.predictOwn(slot, auth, steps);
+    this.applyPredictionVisuals();
+  }
+
+  private predictOwn(slot: number, auth: PlayerSnap, steps: { input: InputState; dt: number }[]): void {
     const p = this.players[slot];
     if (!p) return;
     Object.assign(p, auth); // reset to the host's authoritative state, then replay
     if (p.dead || p.out) return;
     for (const s of steps) {
       p.input = s.input;
-      this.updatePlayer(p, s.dt, true);
+      this.updatePlayer(p, s.dt, true); // movement (+ predicted block bumps inside)
+      this.predictPickups(p);
+      this.predictStomp(p);
       if (p.dead || p.out) break;
+    }
+  }
+
+  // Age out predicted kills; once the host confirms (or contradicts) one the
+  // snapshot stops refreshing it and it expires, un-hiding the enemy.
+  private tickPredictions(): void {
+    for (const [i, ttl] of this.predictedKills) {
+      if (ttl <= 1) this.predictedKills.delete(i);
+      else this.predictedKills.set(i, ttl - 1);
+    }
+  }
+
+  // Push predictions onto the rendered world: hide taken coins and stomped enemies.
+  private applyPredictionVisuals(): void {
+    for (const i of this.predictedCoins) {
+      const c = this.coins[i];
+      if (c) c.taken = true;
+    }
+    for (let i = 0; i < this.enemies.length; i++) {
+      this.enemies[i].hidden = this.predictedKills.has(i);
+    }
+  }
+
+  // Guest-side block bump: change the tile immediately (the host does the real
+  // bump — score, power-up, sound — and confirms via the snapshot). The tile
+  // change is self-deduping: once it's no longer a '?'/'M'/'B' it won't re-fire.
+  private predictBump(p: Player, tx: number, ty: number): void {
+    const t = this.level.tileAt(tx, ty);
+    if (t === '?' || t === 'M') this.level.setTile(tx, ty, 'X');
+    else if (t === 'B' && p.power > 0) this.level.setTile(tx, ty, ' ');
+  }
+
+  private predictPickups(p: Player): void {
+    for (let i = 0; i < this.coins.length; i++) {
+      const c = this.coins[i];
+      if (c.taken || this.predictedCoins.has(i)) continue;
+      if (overlaps(p.rect, c.rect)) this.predictedCoins.add(i);
+    }
+  }
+
+  private predictStomp(p: Player): void {
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (!e.alive || e.kind === 'spiky') continue; // spiky / side hits = damage = host decides
+      if (!overlaps(p.rect, e.rect)) continue;
+      const stomp = p.vy > 0 && p.y + p.h - e.y < Math.max(16, e.h * 0.6);
+      if (!stomp) continue;
+      // predicted bounce (re-derived every frame, so it persists until the host confirms)
+      p.y = e.y - p.h;
+      p.vy = -STOMP_BOUNCE;
+      if (e.hp <= 1) this.predictedKills.set(i, PREDICT_TTL); // only a killing blow hides it
+      break; // one enemy per step
     }
   }
 
@@ -340,36 +410,51 @@ export class Game {
   }
 
   update(dt: number): void {
+    if (!this.beginFrame(dt)) return;
+    for (const p of this.players) this.stepPlayer(p.id, p.input, dt);
+    this.updateWorld(dt);
+  }
+
+  /**
+   * Per-frame bookkeeping (time, music, restart). Returns false when the game
+   * is over and the world should not simulate. Split out so the host can drive
+   * player stepping itself (see stepPlayer/updateWorld).
+   */
+  beginFrame(dt: number): boolean {
     this.time += dt;
-    // guest buffers live one frame: filled during update, read by the host in snapshot()
+    // guest buffers live one frame: filled during stepping, read by the host in snapshot()
     this.pendingTiles = [];
     this.pendingSounds = [];
     if (this.input.wasPressed('KeyM')) this.audio.toggleMusic();
 
     if (this.state === 'won' || this.state === 'gameover') {
       if (this.input.wasPressed('KeyR', 'Enter')) this.restart();
+      return false;
+    }
+    return true;
+  }
+
+  /** Advance a single player by `dt` with the given intent (authoritative). */
+  stepPlayer(slot: number, inp: InputState, dt: number): void {
+    const p = this.players[slot];
+    if (!p || p.out) return;
+    if (p.dead) {
+      p.respawnTimer -= dt;
+      if (p.respawnTimer <= 0) this.placePlayer(p); // respawns at the start
       return;
     }
+    p.input = inp;
+    this.updatePlayer(p, dt);
+  }
 
-    this.updatePlayers(dt);
+  /** Advance everything that isn't a player (enemies, items, fx, camera). */
+  updateWorld(dt: number): void {
     this.updateEnemies(dt);
     this.updatePowerUps(dt);
     this.updateFireballs(dt);
     this.updateCoins();
     this.updateParticles(dt);
     this.updateCamera();
-  }
-
-  private updatePlayers(dt: number): void {
-    for (const p of this.players) {
-      if (p.out) continue;
-      if (p.dead) {
-        p.respawnTimer -= dt;
-        if (p.respawnTimer <= 0) this.placePlayer(p); // respawns at the start
-        continue;
-      }
-      this.updatePlayer(p, dt);
-    }
   }
 
   // `predict` = the guest re-simulating its own player. In that mode the player
@@ -428,7 +513,10 @@ export class Game {
     const res = moveBody(p, this.level, dt);
     p.onGround = res.onGround;
     if (res.onGround) p.coyote = COYOTE_TIME;
-    if (res.hitHead && !predict) this.bumpBlock(p, res.hitHead.tx, res.hitHead.ty);
+    if (res.hitHead) {
+      if (predict) this.predictBump(p, res.hitHead.tx, res.hitHead.ty);
+      else this.bumpBlock(p, res.hitHead.tx, res.hitHead.ty);
+    }
 
     p.x = Math.max(0, Math.min(p.x, this.level.pixelWidth - p.w));
     p.invuln = Math.max(0, p.invuln - dt);
@@ -744,7 +832,7 @@ export class Game {
     this.drawTiles(pal);
     for (const u of this.powerups) if (!u.emerging) this.drawPowerUp(u);
     for (const c of this.coins) if (!c.taken) this.drawCoin(c);
-    for (const e of this.enemies) this.drawEnemy(e);
+    for (const e of this.enemies) if (!e.hidden) this.drawEnemy(e);
     for (const f of this.fireballs) this.drawFireball(f);
     for (const p of this.players) if (!p.dead && !p.out) this.drawPlayer(p);
     for (const pt of this.particles) {

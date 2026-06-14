@@ -94,8 +94,11 @@ export function runHost(
   const game = new Game(ctx, input, audio, count);
   game.setCameraFocus(0); // the host follows its own player (slot 0)
 
-  const latestHeld = new Map<number, { h: Held; seq: number }>(); // last 'held' per slot
-  const prevHeld = new Map<number, Held>(); // previous — for computing press-edges
+  // Per-slot queue of inputs to replay in order, exactly as the guest produced
+  // them — same press-edges (derived on arrival) and same dt — so the host's copy
+  // of each guest follows the identical trajectory the guest predicted.
+  const queues = new Map<number, { inp: InputState; dt: number; seq: number }[]>();
+  const prevHeld = new Map<number, Held>(); // previous held per slot — for press-edges
   const ackSeq = new Map<number, number>(); // last input seq applied per slot — echoed to guests
 
   const sendInit = (peer: PeerId): void => {
@@ -109,7 +112,12 @@ export function runHost(
     if (data.k === 'ready') sendInit(from);
     else if (data.k === 'input') {
       const slot = slotOf.get(from);
-      if (slot != null) latestHeld.set(slot, { h: data.h, seq: data.seq });
+      if (slot == null) return;
+      const inp = deriveInput(data.h, prevHeld.get(slot) ?? EMPTY_HELD);
+      prevHeld.set(slot, data.h);
+      const q = queues.get(slot) ?? [];
+      q.push({ inp, dt: data.dt, seq: data.seq });
+      queues.set(slot, q);
     }
   };
   net.onPeerLeft = (id) => {
@@ -119,14 +127,20 @@ export function runHost(
 
   let lastEpoch = game.epoch;
   loop((dt) => {
-    game.roster[0].input = input.snapshot(bindings); // local player
-    for (const [slot, entry] of latestHeld) {
-      game.roster[slot].input = deriveInput(entry.h, prevHeld.get(slot) ?? EMPTY_HELD);
-      prevHeld.set(slot, entry.h);
-      ackSeq.set(slot, entry.seq); // this input is now baked into the upcoming snapshot
+    if (game.beginFrame(dt)) {
+      game.stepPlayer(0, input.snapshot(bindings), dt); // local player, host frame time
+      // replay each guest's queued inputs in order — one physics sub-step apiece
+      for (const [slot, q] of queues) {
+        for (const e of q) {
+          game.stepPlayer(slot, e.inp, e.dt);
+          ackSeq.set(slot, e.seq); // now baked into the upcoming snapshot
+        }
+        q.length = 0;
+      }
+      game.updateWorld(dt);
+    } else {
+      for (const q of queues.values()) q.length = 0; // game over — don't pile up inputs
     }
-
-    game.update(dt);
 
     // a restart generated a new level — hand it out to guests again (before the snapshot)
     if (game.epoch !== lastEpoch) {
@@ -145,9 +159,11 @@ export function runHost(
 
 // ---------- guest ----------
 
-// How quickly a misprediction is visually absorbed: the position error captured
-// when a snapshot corrects us decays by this factor each frame (~halves in ~4).
-const SMOOTH_DECAY = 0.85;
+// How hard the displayed position is pulled toward the freshly predicted one
+// each frame. The displayed position is also carried by the player's velocity
+// (projective velocity blending), so steady motion has no lag — only the
+// unexpected part of a correction is smoothed away over a few frames.
+const SMOOTH_CORRECT = 0.25;
 // Corrections larger than this (respawn, teleport) snap instead of sliding.
 const SNAP_DIST = 48;
 
@@ -170,8 +186,10 @@ export function runGuest(
   const pending: { seq: number; h: Held; dt: number }[] = []; // inputs not yet acked by the host
   let ackHeld: Held = EMPTY_HELD; // host's last-applied held — the press-edge base for replay
   let auth: PlayerSnap | null = null; // authoritative own-player state from the latest snapshot
-  let offX = 0; // visual error offset, decayed each frame to hide corrections
-  let offY = 0;
+  // displayed (smoothed) own-player position
+  let dispX = 0;
+  let dispY = 0;
+  let haveDisp = false;
 
   net.onMessage = (_from, data: HostMsg) => {
     if (data.k === 'init') {
@@ -184,7 +202,7 @@ export function runGuest(
       ackHeld = EMPTY_HELD;
       auth = null;
       applied = null;
-      offX = offY = 0;
+      haveDisp = false;
     } else if (data.k === 'snap') {
       latest = data.s;
     }
@@ -221,60 +239,45 @@ export function runGuest(
       return;
     }
 
-    // 1. sample our input, send it, and remember it for replay
+    // 1. sample our input, send it (with dt, so the host replays it identically)
     const h = heldOf(input, bindings);
     seq++;
-    net.send('host', { k: 'input', h, seq } satisfies GuestMsg);
+    net.send('host', { k: 'input', h, seq, dt } satisfies GuestMsg);
     pending.push({ seq, h, dt });
     if (pending.length > 600) pending.shift(); // safety cap if snapshots stall
 
-    // 2. fold in a new snapshot (if any) and re-predict our own player
+    // 2. fold in a new snapshot (if any): set the authoritative base and drop acked inputs
     if (latest && latest !== applied) {
-      const snap = latest;
-      applied = snap;
-
-      // where we predicted we'd be, just before the correction (for smoothing)
-      let preX = 0;
-      let preY = 0;
-      let havePre = false;
-      if (auth) {
-        g.predictOwn(slot, auth, toSteps());
-        preX = g.roster[slot].x;
-        preY = g.roster[slot].y;
-        havePre = true;
-      }
-
-      g.applySnapshot(snap); // puppets + own player set to authoritative
-      const ack = snap.acks?.[slot] ?? -1;
+      applied = latest;
+      g.applySnapshot(latest); // puppets, enemies, coins, tiles → authoritative
+      const ack = latest.acks?.[slot] ?? -1;
       while (pending.length && pending[0].seq <= ack) ackHeld = pending.shift()!.h;
-      auth = snap.players[slot] ?? null;
-
-      if (auth) {
-        g.predictOwn(slot, auth, toSteps());
-        if (havePre) {
-          const dx = preX - g.roster[slot].x;
-          const dy = preY - g.roster[slot].y;
-          if (dx * dx + dy * dy < SNAP_DIST * SNAP_DIST) {
-            offX += dx; // absorb the correction into the offset so the sprite doesn't jump
-            offY += dy;
-          } else {
-            offX = offY = 0; // big jump (respawn) — let it snap
-          }
-        }
-      }
-    } else if (auth) {
-      g.predictOwn(slot, auth, toSteps()); // no new snapshot — advance prediction one frame
+      auth = latest.players[slot] ?? null;
     }
 
-    // 3. decay the smoothing offset and apply it to the rendered/camera position
-    offX *= SMOOTH_DECAY;
-    offY *= SMOOTH_DECAY;
-    if (Math.abs(offX) < 0.3) offX = 0;
-    if (Math.abs(offY) < 0.3) offY = 0;
+    // 3. predict our own player + its interactions forward from the authoritative base
     if (auth) {
+      g.guestPredict(slot, auth, toSteps());
       const p = g.roster[slot];
-      p.x += offX;
-      p.y += offY;
+      const rawX = p.x;
+      const rawY = p.y;
+      if (!haveDisp) {
+        dispX = rawX;
+        dispY = rawY;
+        haveDisp = true;
+      } else {
+        // carry by velocity (no lag during steady motion), then ease out the error
+        dispX += p.vx * dt + (rawX - dispX) * SMOOTH_CORRECT;
+        dispY += p.vy * dt + (rawY - dispY) * SMOOTH_CORRECT;
+        const ex = rawX - dispX;
+        const ey = rawY - dispY;
+        if (ex * ex + ey * ey > SNAP_DIST * SNAP_DIST) {
+          dispX = rawX; // big jump (respawn) — snap
+          dispY = rawY;
+        }
+      }
+      p.x = dispX;
+      p.y = dispY;
     }
 
     g.renderFrame(dt);

@@ -88,4 +88,6 @@ export type HostMsg =
 
 // guest → host. `seq` is a monotonic counter so the host can tell the guest
 // (via Snapshot.acks) which of its inputs are already baked into the snapshot.
-export type GuestMsg = { k: 'ready' } | { k: 'input'; h: Held; seq: number };
+// `dt` is the guest's frame time for that input, so the host can replay the
+// exact same physics steps the guest predicted (no trajectory drift).
+export type GuestMsg = { k: 'ready' } | { k: 'input'; h: Held; seq: number; dt: number };

@@ -121,6 +121,7 @@ export class Enemy {
   baseY = 0; // flight axis of the flyer
   jumpTimer = 1; // pause between the hopper's jumps
   hurtFlash = 0; // giant's highlight after the first hit
+  hidden = false; // guest-only: locally predicted dead (a stomp not yet confirmed by the host)
 
   constructor(
     x: number,
